@@ -416,7 +416,7 @@ def draw_drifts(drifts ,drift_data, train_data):
     ax1.plot(pd.Series(drift_data[d]).fillna(method='bfill'))
   ax1.plot(val_data.fillna(method='bfill'), color='darkgray', linestyle='--' )
 
-  ax1.bar(x=drifts, height=train_data.fillna(method='bfill').loc[drifts], width=2, color='r')
+  ax1.bar(x=drifts, height=train_data.fillna(method='bfill').loc[drifts].values, width=2, color='r')
   for k, drift_point in enumerate(drifts):
       #ax1.annotate(k, xy=(10, 100),  xycoords='axes points', xytext=(drift_point, -10), textcoords='data')
       #ax1.annotate(drift_point.date().strftime('%Y-%m-%d'), xy=(10, -100),  xycoords='axes points', xytext=(drift_point-delta(days=10), -150), textcoords='data', rotation=90)
