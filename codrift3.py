@@ -210,36 +210,39 @@ def splitter(data, lags):
     y = X.pop(0)
     return X, y
 
-def normalizer(input, fit=True):
+def normalizer(input, fit=True, transform=1):
     """ pass normalizer to fit """
     MinMax = preprocessing.MinMaxScaler()
     if fit == True:
         out = MinMax.fit_transform(input)
         return MinMax, out
     else:
-        out = fit.transform(input)
+        if transform == -1:
+            out = fit.inverse_transform(input)
+        else:
+            out = fit.transform(input)
         return out
 
 def torcher(data):
-    print(data)
-    print(torch.from_numpy(data).float())
+    #print(data)
+    #print(torch.from_numpy(data).float())
     return torch.from_numpy(data).float()
 
 
-def torch_data(train_data, val_data, test_data):
+def torch_data(train_data, val_data, test_data, lags):
 
     #train_data, val_data, test_data = train_val_test_split(get_data(), 0.7, 0.2)
 
-    X_train = pd.DataFrame(tsa.add_lag(train_data, lags =14))
+    X_train = pd.DataFrame(tsa.add_lag(train_data, lags =lags))
     #X_train = pd.DataFrame(tsa.add_lag(train_data.diff().dropna(), lags =14))
     y_train = torch.from_numpy(X_train.pop(0).values.reshape(-1,1)).float()
 
-    X_val = pd.DataFrame(tsa.add_lag(val_data, lags =14))
+    X_val = pd.DataFrame(tsa.add_lag(val_data, lags =lags))
     #X_train = pd.DataFrame(tsa.add_lag(train_data.diff().dropna(), lags =14))
     y_val = torch.from_numpy(X_val.pop(0).values.reshape(-1,1)).float()
 
     #X_test = pd.DataFrame(tsa.add_lag(test_data, lags =14))
-    X_test = pd.DataFrame(tsa.add_lag(test_data, lags =14))
+    X_test = pd.DataFrame(tsa.add_lag(test_data, lags =lags))
     y_test = torch.from_numpy(X_test.pop(0).values.reshape(-1,1)).float()
 
     #normalization ELM
@@ -263,7 +266,7 @@ def objective_elm(trial):
     results = np.zeros(10)
     
     for i in range(10):
-        model = ELM(input_size=14, h_size=h_size, activation=activation, device=device)
+        model = ELM(input_size=14, h_size=h_size, activation=activation, device=device) #variar o input-size (FIX)
         model.fit(X_train_mm, y_train)
         y_pred = model.predict(X_val_mm)
         mse = -mean_squared_error(y_val, y_pred)
@@ -276,14 +279,14 @@ def train_elm(x, y):
     study = optuna.create_study(direction="maximize", study_name='elm_study')
     study.optimize(objective_elm, n_trials=50, show_progress_bar=True)
     params = study.best_params
-    best_elm = ELM(input_size=14, h_size=params['h_size'], activation=params['activation'], device=device)
+    best_elm = ELM(input_size=14, h_size=params['h_size'], activation=params['activation'], device=device) #variar o input-size (FIX)
     best_elm.fit(x, y)
     return best_elm
 
 def objective_svm(trial):
     svr_k = trial.suggest_categorical('kernel',['linear', 'rbf'])
     #svr_k = trial.suggest_categorical('kernel',['rbf'])
-    svr_g = trial.suggest_float("gamma", 0.001, 1000, log=True)
+    svr_g = trial.suggest_float("gamma", 0.001, 1000, log=True) #auto, scale
     svr_c = trial.suggest_float("C", 0.0001, 10000, log=True)
     svr_e = trial.suggest_float("epsilon",0.001, 0.1, log=True)
     svr_t = trial.suggest_float("tolerance", 0.0001, 0.01, log=True)
@@ -297,7 +300,7 @@ def objective_svm(trial):
 def train_svm(x, y):
     #optimization
     study = optuna.create_study(direction="maximize", study_name='svr_study')
-    study.optimize(objective_svm, n_trials=50, show_progress_bar=True)
+    study.optimize(objective_svm, n_trials=100, show_progress_bar=True)
     params = study.best_params
     best_svr = SVR(kernel=params['kernel'], C=params['C'], epsilon=params['epsilon'], tol=params['tolerance'])
     best_svr.fit(x, y)
@@ -335,10 +338,16 @@ def get_oracle(predictions, true):
 def post_forecast(preds):
     return preds.mask(preds < 0, 0)
 
+def log_arts(country,model):
+    log_artifacts("outputs/"+country+"/data")
+    log_artifacts("outputs/"+country+"/preds/"+model)
+    log_artifact('outputs/'+country+'/prediction.png')
+    return True
+
 
 def main():
     
-    mlflow.set_experiment("codrift_debug")
+    mlflow.set_experiment("codrift")
         
     if sys.argv[1] == 'help':
         print('models: rw, arima, sarima, AS, ASDS, ASO...')
@@ -346,15 +355,21 @@ def main():
     country = sys.argv[1]
     model = sys.argv[2]
     split = sys.argv[3]
-    size = int(sys.argv[4])
-    if (model == 'ASDS'):
-        K = int(sys.argv[5])
-        rname = country+'.'+model+'.'+split+'.'+str(size)+'.'+str(K)
+    lags = int(sys.argv[4])
+    size = int(sys.argv[5])
+    if (model == 'ASDS' or model == 'AEDS'):
+        K = int(sys.argv[6])
+        rname = country+'.'+model+'.'+split+'.'+str(lags)+'.'+str(size)+'.'+str(K)
     else:
         rname =  country+'.'+model+'.'+split
 
     print(rname)
     with mlflow.start_run(run_name=rname):
+
+            if not os.path.exists("outputs/"+country+"/data"):
+                os.makedirs("outputs/"+country+"/data")
+            if not os.path.exists("outputs/"+country+"/preds/"+model):
+                os.makedirs("outputs/"+country+"/preds/"+model)
 
             data = get_data('covid', country+'_daily.csv')
             data = fix_outliers(data)
@@ -362,9 +377,6 @@ def main():
             #print('train: ', train_data.head(1), train_data.tail(1), len(train_data) )
             #print('val: ', val_data.head(1), val_data.tail(1), len(val_data) )
             #print('test: ', test_data.head(1), test_data.tail(1), len(test_data) )
-            
-            if not os.path.exists("outputs/"+country+"/data"):
-                os.makedirs("outputs/"+country+"/data")
 
             train_data.to_csv("outputs/"+country+"/data/train_data.csv")
             val_data.to_csv("outputs/"+country+"/data/val_data.csv")
@@ -378,13 +390,161 @@ def main():
             global y_val
             global X_test_mm
             global y_test
+            
+            X, y = splitter(data, lags)
+            sz = len(X)
+            X_train, y_train = X[:int(sz*0.7)], y[:int(sz*0.7)]
+            X_val, y_val = X[int(sz*0.7):int(sz*0.9)], y[int(sz*0.7):int(sz*0.9)]
+            X_test, y_test = X[int(sz*0.9)-1:], y[int(sz*0.9)-1:]
 
+            if not os.path.exists("models/"+country+"/normx.pkl"):
+                normx, X_train_mm = normalizer(X_train)
+                normy, y_train_mm = normalizer(y_train.values.reshape(-1,1))
+                joblib.dump(normx, "models/"+country+"/normx.pkl") 
+                joblib.dump(normy, "models/"+country+"/normy.pkl") 
+            else:
+                normx = joblib.load("models/"+country+"/normx.pkl")
+                normy = joblib.load("models/"+country+"/normy.pkl")
 
-            if not os.path.exists("models/"+country):
-                os.makedirs("models/"+country)
+            X_val_mm = normalizer(X_val, normx)
+            X_test_mm = normalizer(X_test, normx)
+            y_val_mm = normalizer(y_val.values.reshape(-1,1), normy)
+            y_test_mm = normalizer(y_test.values.reshape(-1,1), normy)
 
-            if not os.path.exists("outputs/"+country+"/preds/"+model):
-                os.makedirs("outputs/"+country+"/preds/"+model)
+            if model == 'rw':
+                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
+                #Baseline 
+                    if split == 'val':
+                        y_pred = post_forecast(random_walk(val_data))
+                        metrics = eval_metrics(val_data[1:], y_pred)
+                        draw_predictions(country, y_pred, val_data)
+                    elif split == 'test':
+                        y_pred = post_forecast(random_walk(test_data))
+                        metrics = eval_metrics(test_data.iloc[size+1:], y_pred.iloc[size:])
+                        draw_predictions(country, y_pred, test_data)
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model})
+                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    
+                    log_metrics(metrics)
+                    log_arts(country,model)
+                    mlflow.end_run()
+                    
+            if model == 'arima':
+                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
+                    if not os.path.exists("models/"+country+"/arima.pkl"):
+                        arima = train_arima(train_data)
+                        arima.save("models/"+country+"/arima.pkl")
+                    else:
+                        arima = sm.load("models/"+country+"/arima.pkl")
+                    log_params(arima.specification)
+                    
+                    with open("outputs/"+country+"/arima.txt", "w") as f:
+                        f.write(arima.summary().as_text())
+                    log_artifact("outputs/"+country+"/arima.txt")
+                    if split == 'val':
+                        arima = update_arima(arima, val_data)
+                        y_pred = post_forecast(arima.predict())
+                        metrics = eval_metrics(val_data, y_pred)
+                        draw_predictions(country, y_pred, val_data)
+                    elif split == 'test':
+                        arima = update_arima(arima, test_data)
+                        y_pred = post_forecast(arima.predict())
+                        #metrics = eval_metrics(y_pred, test_data)
+                        test_data.index = y_pred.index
+                        print('mape', mean_absolute_percentage_error(test_data, y_pred))
+                        metrics = eval_metrics(test_data.iloc[7:], y_pred.iloc[7:])
+                        draw_predictions(country, y_pred, test_data)
+                    log_metrics(metrics)
+                    log_params(arima.specification)
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
+                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_arts(country,model)
+                    mlflow.end_run()
+                    
+            if model == 'sarima':
+                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
+                    if not os.path.exists("models/"+country+"/sarima.pkl"):
+                        sarima = train_arima(train_data, sarima=True)
+                        sarima.save("models/"+country+"/sarima.pkl")
+                    else:
+                        sarima = sm.load("models/"+country+"/sarima.pkl")
+                    log_params(sarima.specification)
+                    
+                    if split == 'val':
+                        sarima = update_arima(sarima, val_data)
+                        y_pred = post_forecast(sarima.predict())
+                        metrics = eval_metrics(val_data, y_pred)
+                        draw_predictions(country, y_pred, val_data)
+                    elif split == 'test':
+                        sarima = update_arima(sarima, test_data)
+                        y_pred = post_forecast(sarima.predict())
+                        metrics = eval_metrics(test_data.iloc[7:], y_pred.iloc[7:])
+                        draw_predictions(country, y_pred, test_data)
+                    log_metrics(metrics)
+                    log_params(sarima.specification)
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
+
+                    with open("outputs/"+country+"/sarima.txt", "w") as f:
+                        f.write(sarima.summary().as_text())
+                    log_artifact("outputs/"+country+"/sarima.txt")
+                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_arts(country,model)
+                    mlflow.end_run()
+            
+            if model == 'svm':                    
+                    norm, X_train_mm = normalizer(X_train)
+                    X_val_mm = normalizer(X_val, norm)
+                    X_test_mm = normalizer(X_test, norm)
+                    #print(np.concatenate((X_train_mm, X_val_mm), axis=0), np.concatenate((y_train, y_val), axis=0))
+                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
+                    if not os.path.exists("models/"+country+"/svm.pkl"):
+                        svm = train_svm(X_train_mm, y_train)
+                        joblib.dump(svm, "models/"+country+"/svm.pkl") 
+                    else:
+                        svm = joblib.load("models/"+country+"/svm.pkl")                  
+                    
+                    if split == 'test':
+                        y_pred = post_forecast(pd.DataFrame(svm.predict(X_test_mm)))
+                        y_test = pd.DataFrame(y_test.reset_index(drop=True))
+                        metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
+                        draw_predictions(country, y_pred, y_test)
+                    log_metrics(metrics)
+                    log_params(svm.get_params())
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
+
+                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_arts(country,model)
+                    mlflow.end_run()
+                
+            if model == 'elm':
+                    #X_train_mm, y_train, X_val_mm, y_val, X_test_mm, y_test = torch_data(train_data, val_data, test_data, lags)
+                    
+                    norm, X_train_mm = normalizer(X_train)
+                    X_val_mm = normalizer(X_val, norm)
+                    X_test_mm = normalizer(X_test, norm)
+                    X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train.values.reshape(-1,1)), torcher(X_val_mm), torcher(y_val.values.reshape(-1,1))
+                    X_test_mm, y_test= torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
+        
+                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
+                    if not os.path.exists("models/"+country+"/elm.pkl"):
+                        elm = train_elm(X_train_mm, y_train)
+                        torch.save(elm ,"models/"+country+"/elm.pkl")
+                    else:
+                        elm = torch.load("models/"+country+"/elm.pkl")
+                    
+                    if split == 'test':
+                        y_pred = post_forecast(pd.Series(elm.predict(X_test_mm).numpy().flatten()))
+                        y_test = pd.DataFrame(y_test.numpy())
+                        metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
+                        draw_predictions(country, y_pred, y_test)
+                    log_metrics(metrics)
+                    log_params({'h_size': elm._h_size})
+                    #log_params({'h_size': elm._h_size, 'activation' :elm.activation_name})
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
+
+                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_arts(country,model)
+                    mlflow.end_run()
 
             #ADWIN-SARIMA (AS)
             if model == "AS":
@@ -441,6 +601,8 @@ def main():
                     #print(preds)
                     #print(true)
                     #oracle = get_oracle(preds, true)
+                    print(preds.shape)
+                    print(true.shape)
                     best, oracle = get_oracle(preds, true)
                     pd.Series(best).to_csv("outputs/"+country+"/preds/"+model+"/best.csv")
                     oracle.to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
@@ -448,15 +610,15 @@ def main():
                     draw_predictions(country, oracle, true)
                     log_metrics(metrics)
                     mlflow.set_tags({'data': country, 'split': split, 'model': model, 'drift': detector, 'size': size})
-                    log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact('outputs/'+country+'/prediction.png')
+                    log_arts(country,model)
                 mlflow.end_run()
 
         #ADWIN-SARIMA-DYNAMIC-SELECTION (ASDS)
             if model == "ASDS":
                 submodel = "AS"
-                size = int(sys.argv[4])
-                K = int(sys.argv[5])
+                size = int(sys.argv[5])
+                K = int(sys.argv[6])
+                lags = int(sys.argv[4])
                 if not os.path.exists("outputs/"+country+"/preds/"+submodel):
                     print('execute o modelo AS antes, e tente novamente')
                 else:
@@ -534,159 +696,79 @@ def main():
                     preds_selection.to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
                     log_params({'pool': 'sarimas', 'window_size': size ,'K':K, 'metric':'mse', 'distance': None})
                     mlflow.set_tags({'data': country, 'split': split, 'model': model, 'drift': detector, 'size': size, 'k': k})
-                    log_artifacts("outputs/"+country+"/data")
-                    log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact('outputs/'+country+'/prediction.png')
-                    mlflow.end_run()
-
-
-            if model == 'rw':
-                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
-                #Baseline 
-                    if split == 'val':
-                        y_pred = post_forecast(random_walk(val_data))
-                        metrics = eval_metrics(val_data[1:], y_pred)
-                        draw_predictions(country, y_pred, val_data)
-                    elif split == 'test':
-                        y_pred = post_forecast(random_walk(test_data))
-                        metrics = eval_metrics(test_data.iloc[size+1:], y_pred.iloc[size:])
-                        draw_predictions(country, y_pred, val_data)
-                    mlflow.set_tags({'data': country, 'split': split, 'model': model})
-                    log_metrics(metrics)
-                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
-                    log_artifacts("outputs/"+country+"/data")
-                    log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact('outputs/'+country+'/prediction.png')
-                    mlflow.end_run()
-                    
-            if model == 'arima':
-                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
-                    if not os.path.exists("models/"+country+"/arima.pkl"):
-                        arima = train_arima(train_data)
-                        arima.save("models/"+country+"/arima.pkl")
-                    else:
-                        arima = sm.load("models/"+country+"/arima.pkl")
-                    log_params(arima.specification)
-                    
-                    with open("outputs/"+country+"/arima.txt", "w") as f:
-                        f.write(arima.summary().as_text())
-                    log_artifact("outputs/"+country+"/arima.txt")
-                    if split == 'val':
-                        arima = update_arima(arima, val_data)
-                        y_pred = post_forecast(arima.predict())
-                        metrics = eval_metrics(val_data, y_pred)
-                        draw_predictions(country, y_pred, val_data)
-                    elif split == 'test':
-                        arima = update_arima(arima, test_data)
-                        y_pred = post_forecast(arima.predict())
-                        #metrics = eval_metrics(y_pred, test_data)
-                        test_data.index = y_pred.index
-                        print('mape', mean_absolute_percentage_error(test_data, y_pred))
-                        metrics = eval_metrics(test_data.iloc[7:], y_pred.iloc[7:])
-                        draw_predictions(country, y_pred, test_data)
-                    log_metrics(metrics)
-                    log_params(arima.specification)
-                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
-                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
-                    log_artifacts("outputs/"+country+"/data")
-                    log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact('outputs/'+country+'/prediction.png')
-                    mlflow.end_run()
-                    
-            if model == 'sarima':
-                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
-                    if not os.path.exists("models/"+country+"/sarima.pkl"):
-                        sarima = train_arima(train_data, sarima=True)
-                        sarima.save("models/"+country+"/sarima.pkl")
-                    else:
-                        sarima = sm.load("models/"+country+"/sarima.pkl")
-                    log_params(sarima.specification)
-                    
-                    if split == 'val':
-                        sarima = update_arima(sarima, val_data)
-                        y_pred = post_forecast(sarima.predict())
-                        metrics = eval_metrics(val_data, y_pred)
-                        draw_predictions(country, y_pred, val_data)
-                    elif split == 'test':
-                        sarima = update_arima(sarima, test_data)
-                        y_pred = post_forecast(sarima.predict())
-                        metrics = eval_metrics(test_data.iloc[7:], y_pred.iloc[7:])
-                        draw_predictions(country, y_pred, test_data)
-                    log_metrics(metrics)
-                    log_params(sarima.specification)
-                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
-
-                    with open("outputs/"+country+"/sarima.txt", "w") as f:
-                        f.write(sarima.summary().as_text())
-                    log_artifact("outputs/"+country+"/sarima.txt")
-                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
-                    log_artifacts("outputs/"+country+"/data")
-                    log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact('outputs/'+country+'/prediction.png')
+                    log_arts(country,model)
                     mlflow.end_run()
             
-            if model == 'svm':
-                    X_train, y_train  = splitter(train_data, 14)
-                    X_val, y_val  = splitter(val_data, 14)
-                    X_test, y_test  = splitter(test_data, 14)
 
-                    norm, X_train_mm = normalizer(X_train)
-                    X_val_mm = normalizer(X_val, norm)
-                    X_test_mm = normalizer(X_test, norm)
-                    #print(np.concatenate((X_train_mm, X_val_mm), axis=0), np.concatenate((y_train, y_val), axis=0))
-                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
-                    if not os.path.exists("models/"+country+"/svm.pkl"):
-                        svm = train_svm(X_train_mm, y_train)
-                        #with open("models/"+country+"/svm.pkl", 'wb') as f:
-                            # Pickle the 'data' dictionary using the highest protocol available.
-                        #    pickle.dump(svm, f, pickle.HIGHEST_PROTOCOL)
-                        joblib.dump(svm, "models/"+country+"/svm.pkl") 
-                    else:
-                        #with open("models/"+country+"/svm.pkl", 'rb') as f:
-                            # The protocol version used is detected automatically, so we do not
-                            # have to specify it.
-                        #    svm = pickle.load(f)   
-                        svm = joblib.load("models/"+country+"/svm.pkl")                  
-                    
-                    if split == 'test':
-                        y_pred = post_forecast(pd.Series(svm.predict(X_test_mm)))
-                        y_test = pd.DataFrame(y_test)
-                        metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
-                        draw_predictions(country, y_pred, y_test)
-                    log_metrics(metrics)
-                    log_params(svm.get_params())
-                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
+            #ADWIN-SVM (ASV)
+            if model == "ASV":
+                    detector = 'adwin'
+                    drifts, drift_data = get_drifts(train_data, country, detector=detector)
+                    draw_drifts(country, drifts, drift_data, train_data)
+                    log_artifact('outputs/'+country+'/drifts.png')
+                    if not os.path.exists("models/"+country+"/svms"):
+                        os.makedirs("models/"+country+"/svms")
+                    svms = {}
+                    for k, dft in drift_data.items():
+                        try: 
+                            svms[k] = joblib.load("models/"+country+"/svms/svms"+str(k)+".pkl")
+                        except:
+                            try:
+                                X_train, y_train  = splitter(dft, lags)
+                                X_val, y_val  = splitter(dft, lags) #gambiarra, é preciso definir o conjunto de validaçao dentro da janela de drift
+                                
+                                X_train_mm = normalizer(X_train, normx)
+                                y_train_mm = normalizer(y_train.values.reshape(-1,1), normy)
+                                X_val_mm = normalizer(X_val, normx)
+                                y_val_mm = normalizer(y_val.values.reshape(-1,1), normy)
+                                
+                                svm = train_svm(X_train_mm, y_train_mm)
+                                joblib.dump(svm, "models/"+country+"/svms/svms"+str(k)+".pkl")
+                                svms[k] = joblib.load("models/"+country+"/svms/svms"+str(k)+".pkl")
+                            except:
+                                k -= 1
+                        
+                    preds = {}
+                    for k, m in svms.items():
+                        with mlflow.start_run(run_name=country+'.'+model+'.'+split+'.'+str(k), nested=True):
+                            y_pred = normalizer(m.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
+                            #print(y_pred)
+                            y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
+                            preds[k] = y_pred
 
-                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                            y_test = pd.DataFrame(y_test).reset_index(drop=True)
+                            metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
+
+                            log_params(m.get_params())
+                            mlflow.set_tags({'data': country, 'split': split, 'model': model, 'submodel': k, 'drift': detector})
+                            #metrics = eval_metrics(test_data.iloc[size:], preds[k].iloc[size:])
+                            log_metrics(metrics)
+                    pd.DataFrame(preds).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
                     log_artifacts("outputs/"+country+"/data")
                     log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact('outputs/'+country+'/prediction.png')
                     mlflow.end_run()
 
-                
-            if model == 'elm':
-                    X_train_mm, y_train, X_val_mm, y_val, X_test_mm, y_test = torch_data(train_data, val_data, test_data)
-                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
-                    if not os.path.exists("models/"+country+"/elm.pkl"):
-                        elm = train_elm(X_train_mm, y_train)
-                        torch.save(elm ,"models/"+country+"/elm.pkl")
-                    else:
-                        elm = torch.load("models/"+country+"/elm.pkl")
-                    
-                    if split == 'test':
-                        y_pred = post_forecast(pd.Series(elm.predict(X_test_mm).numpy().flatten()))
-                        y_test = pd.DataFrame(y_test.numpy())
-                        metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
-                        draw_predictions(country, y_pred, y_test)
+            #ADWIN-SVM-ORACLE (ASVO)
+            if model == "ASVO":
+                submodel = "ASV"
+                detector = 'adwin'
+                if not os.path.exists("outputs/"+country+"/preds/"+submodel):
+                    print('execute o modelo AS antes e depois tente novamente')
+                else:
+                    preds = pd.read_csv("outputs/"+country+"/preds/"+submodel+"/"+submodel+'_'+split+'.csv', index_col=0, parse_dates=True)
+                    true = pd.read_csv("outputs/"+country+"/data/test_data.csv", index_col=0, parse_dates=True).reset_index(drop=True)
+                    #print(preds.shape)
+                    #print(true.shape)
+                    #oracle = get_oracle(preds, true)
+                    best, oracle = get_oracle(preds, true)
+                    pd.Series(best).to_csv("outputs/"+country+"/preds/"+model+"/best.csv")
+                    oracle.to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    metrics = eval_metrics(true.iloc[size+1:], oracle.iloc[size:])
+                    draw_predictions(country, oracle, true)
                     log_metrics(metrics)
-                    log_params({'h_size': elm._h_size, 'activation' :elm.activation_name})
-                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
-
-                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
-                    log_artifacts("outputs/"+country+"/data")
-                    log_artifacts("outputs/"+country+"/preds/"+model)
-                    log_artifact("outputs/"+country+"/prediction.png")
-                    mlflow.end_run()
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'drift': detector, 'size': size})
+                    log_arts(country,model)
+                mlflow.end_run()
 
             #ADWIN-ELM (AE)
             if model == "AE":
@@ -702,7 +784,7 @@ def main():
                     norms = {}
                     for k, dft in drift_data.items():
                         try: 
-                            print('carrega',k)
+                            #print('carrega',k)
                             elms[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
                             #with open("models/"+country+"/elms/norm"+str(k)+".pkl", 'rb') as f:
                                 # The protocol version used is detected automatically, so we do not
@@ -711,55 +793,154 @@ def main():
                             norms[k] = joblib.load("models/"+country+"/norms/norm"+str(k)+".pkl") 
                         except:
                             try:
-                                print('treino',k)
-                                X_train, y_train  = splitter(dft, 14)
-                                X_val, y_val  = splitter(dft, 14) #gambiarra, é preciso definir o conjunto de validaçao dentro da janela de drift
-                                print('dados')
+                                #print('treino',k)
+                                X_train, y_train  = splitter(dft, lags)
+                                X_val, y_val  = splitter(dft, lags) #gambiarra, é preciso definir o conjunto de validaçao dentro da janela de drift
+                                #print('dados')
                                 
                                 norm, X_train_mm = normalizer(X_train)
                                 X_val_mm = normalizer(X_val, norm)
                                 norms[k] = norm
                                 joblib.dump(norm, "models/"+country+"/norms/norm"+str(k)+".pkl") 
-                                print('norm')
+                                #print('norm')
                                 X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train.values.reshape(-1,1)), torcher(X_val_mm), torcher(y_val.values.reshape(-1,1))
-                                print('torch')
+                                #print('torch')
                                 elm = train_elm(X_train_mm, y_train)
-                                print('treinamento')
+                                #print('treinamento')
                                 
                                 torch.save(elm ,"models/"+country+"/elms/elm"+str(k)+".pkl")
-                                elm[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
+                                elms[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
                                 #with open("models/"+country+"/elms/norm"+str(k)+".pickle", 'wb') as f:
                                     # Pickle the 'data' dictionary using the highest protocol available.
                                 #    pickle.dump(norms, f, pickle.HIGHEST_PROTOCOL)
-                                
 
                             except:
-                                print('erro treino', k)
                                 pass
                                 #k -= 1
-                        #joblib.dump(norm, "models/"+country+"/norms/norm"+str(k)+".pkl") 
+                        #joblib.dump(norm, "models/"+country+"/norms/norm"+str(k)+".pkl")
 
                     preds = {}
                     for k, m in elms.items():
-                        print('previsao',k)
                         with mlflow.start_run(run_name=country+'.'+model+'.'+split+'.'+str(k), nested=True):
-                            X_test, y_test  = splitter(test_data, 14)                            
                             X_test_mm = normalizer(X_test, norms[k])
                             X_test_mm, y_test = torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
 
-                            preds[k] = m.predict(X_test_mm).numpy().flatten()
                             log_params({'h_size': m._h_size, 'activation' :m.activation_name})
                             mlflow.set_tags({'data': country, 'split': split, 'model': model, 'submodel': k, 'drift': detector})
                             y_pred = post_forecast(pd.Series(m.predict(X_test_mm).numpy().flatten()))
                             y_test = pd.DataFrame(y_test.numpy())
                             metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
                             log_metrics(metrics)
-                    print(preds)
-                    print(pd.DataFrame(preds))
+                            preds[k] = y_pred
+                    #print(preds)
+                    #print(pd.DataFrame(preds))
                     pd.DataFrame(preds).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
                     log_artifacts("outputs/"+country+"/data")
                     log_artifacts("outputs/"+country+"/preds/"+model)
                     mlflow.end_run()
+
+            #ADWIN-ELM-DYNAMIC-SELECTION (AEDS)
+            if model == "AEDS":
+                submodel = "AE"
+                size = int(sys.argv[5])
+                K = int(sys.argv[6])
+                lags = int(sys.argv[4])
+                if not os.path.exists("outputs/"+country+"/preds/"+submodel):
+                    print('execute o modelo AE antes, e tente novamente')
+                else:
+                    detector = 'adwin'
+                    drifts, drift_data = get_drifts(train_data, country, detector=detector)
+                    draw_drifts(country, drifts, drift_data, train_data)
+                    log_artifact('outputs/'+country+'/drifts.png')
+                    elms = {}
+                    norms = {}
+                    for k, dft in drift_data.items():
+                        try: 
+                            #print('carrega',k)
+                            elms[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
+                            norms[k] = joblib.load("models/"+country+"/norms/norm"+str(k)+".pkl") 
+                        except:
+                            print('erro carrega', k)
+                    
+                    X_test_mm = normalizer(X_test, norms[k])
+                    #X_test_mm, y_test = torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
+                    X_test_mm = torcher(X_test_mm)
+                    #print('xtest', X_test)
+                    #print('ytest', y_test)
+                    preds = {}
+                    errors = {}
+                    selection = {}
+                    for w in range(size,len(y_test)):
+                        last = w
+                        first = w - size
+                        preds[last] = {}
+                        errors[last] = {}
+                        selection[last] = {}
+                        for k, m in elms.items():
+                            preds[last][k] = m.predict(X_test_mm[first:last])
+                            errors[last][k] = mean_squared_error(y_test.iloc[first:last], preds[last][k])
+                        #print(preds)
+                        #print(y_test.iloc[first:last])
+                        #print(errors[last])
+                        df_error = pd.Series(errors[last]).rank()
+                        #print(df_error)
+                        for i in range(K):
+                            try:
+                                selection[last][i] = df_error.loc[df_error == i+1].index.values[0]
+                            except:
+                                #print(['*']*1000)
+                                #print(df_error.idxmin()) # solucao para ranks malucos 1.5, 2 sem 1...
+                                selection[last][i] = df_error.idxmin()
+                        # #print(selection[last])
+                        #selection[last] = df_error.loc[df_error < K+1].index.values[:K]
+                    df_selection = pd.DataFrame(selection).T
+                    #df_selection.index = pd.to_datetime(df_selection.index)
+                    preds_all = pd.read_csv("outputs/"+country+"/preds/"+submodel+"/"+submodel+'_'+split+'.csv', index_col=0, parse_dates=True)
+                    preds_selection = {}
+                    #print(preds_all)
+                    for row in df_selection.iterrows():
+                        preds_selection[row[0]] = preds_all.loc[row[0]].iloc[row[1]].mean()
+                        #print(row[0])
+                        #print(row[1])
+                        #print(preds_all.loc[row[0]].iloc[row[1]])
+                    preds_selection = pd.Series(preds_selection).T
+                    #print(preds_selection)
+                    #print(data)
+                    #print(data.align(preds_selection, join='right', axis=0))
+                    #metrics = eval_metrics(preds_selection, data.reindex_like(preds_selection))
+                    metrics = eval_metrics(pd.DataFrame(y_test).reset_index(drop=True).iloc[size:], preds_selection)
+                    draw_predictions(country, preds_selection, data)
+                    log_metrics(metrics)
+                    pd.DataFrame(errors).to_csv("outputs/"+country+"/preds/"+model+"/errors.csv")
+                    pd.DataFrame(preds).to_csv("outputs/"+country+"/preds/"+model+"/preds.csv")
+                    df_selection.to_csv("outputs/"+country+"/preds/"+model+"/selection.csv")
+                    preds_selection.to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_params({'pool': 'elms', 'window_size': size ,'K':K, 'metric':'mse', 'distance': None})
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'drift': detector, 'size': size, 'k': k})
+                    log_arts(country,model)
+                    mlflow.end_run()
+
+            #ADWIN-ELM-ORACLE (AEO)
+            if model == "AEO":
+                submodel = "AE"
+                detector = 'adwin'
+                if not os.path.exists("outputs/"+country+"/preds/"+submodel):
+                    print('execute o modelo AS antes e depois tente novamente')
+                else:
+                    preds = pd.read_csv("outputs/"+country+"/preds/"+submodel+"/"+submodel+'_'+split+'.csv', index_col=0, parse_dates=True)
+                    true = pd.read_csv("outputs/"+country+"/data/test_data.csv", index_col=0, parse_dates=True).reset_index(drop=True)
+                    #print(preds.shape)
+                    #print(true.shape)
+                    #oracle = get_oracle(preds, true)
+                    best, oracle = get_oracle(preds, true)
+                    pd.Series(best).to_csv("outputs/"+country+"/preds/"+model+"/best.csv")
+                    oracle.to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    metrics = eval_metrics(true.iloc[size+1:], oracle.iloc[size:])
+                    draw_predictions(country, oracle, true)
+                    log_metrics(metrics)
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'drift': detector, 'size': size})
+                    log_arts(country,model)
+                mlflow.end_run()
 
             """
             tracking_url_type_store = urlparse(mlflow.get_tracking_uri()).scheme
