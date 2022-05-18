@@ -50,6 +50,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+import tensorflow as tf
+from tensorflow import keras
+from keras.models import Sequential
+from keras import layers
+
 from river import drift
 
 #visualization
@@ -212,7 +217,7 @@ def splitter(data, lags):
 
 def normalizer(input, fit=True, transform=1):
     """ pass normalizer to fit """
-    MinMax = preprocessing.MinMaxScaler()
+    MinMax = preprocessing.MinMaxScaler(feature_range=(-1,1))
     if fit == True:
         out = MinMax.fit_transform(input)
         return MinMax, out
@@ -260,7 +265,7 @@ def torch_data(train_data, val_data, test_data, lags):
 
 def objective_elm(trial):
     #h_size = trial.suggest_int("h_size", 2, 20)
-    h_size = trial.suggest_int("h_size", 2, 200)
+    h_size = trial.suggest_categorical('h_size', [8, 16, 32, 64, 100, 200])
     activation = trial.suggest_categorical("activation", ["sigmoid", "tanh", "relu"])
     # Generate the model.
     results = np.zeros(10)
@@ -306,6 +311,45 @@ def train_svm(x, y):
     best_svr.fit(x, y)
     return best_svr
 
+def objective_lstm(trial):
+    model = Sequential()
+    model.add(layers.LSTM(units= trial.suggest_categorical('units', [8, 16, 32, 64, 100, 200]), input_shape=(14, 1)))
+    #model.add(layers.LSTM(100, input_shape=(14, 1), dropout=0.2, return_sequences=True))
+    #model.add(layers.Dropout(0.2))
+    #model.add(layers.LSTM(100, dropout=0.2))
+    #model.add(layers.Dropout(0.2))
+    model.add(layers.Dense(1, activation=trial.suggest_categorical('activation', ['relu', 'linear', 'tanh']),) )
+
+    score = np.zeros(10)
+    for i in range(10):
+        # We compile our model with a sampled learning rate.
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001), loss='mse')
+
+
+        model.fit(
+            X_train_mm,
+            y_train,
+            validation_data=(X_val_mm, y_val),
+            shuffle=True,
+            batch_size=32,
+            epochs=40,
+            verbose=False,
+        )
+
+        # Evaluate the model accuracy on the validation set.
+        score[i] = model.evaluate(X_val_mm, y_val, verbose=0)
+    return score.mean()   
+
+
+def train_lstm(x, y):
+    #optimization
+    study = optuna.create_study(direction="maximize", study_name='lstm_study')
+    study.optimize(objective_lstm, n_trials=50, show_progress_bar=True)
+    params = study.best_params
+    best_lstm = lstm(input_size=14, h_size=params['h_size'], activation=params['activation'], device=device) #variar o input-size (FIX)
+    best_lstm.fit(x, y)
+    return best_lstm
+
 def eval_metrics(actual, pred):
     rmse = mean_squared_error(actual, pred, squared=False)
     mae = mean_absolute_error(actual, pred)
@@ -347,7 +391,8 @@ def log_arts(country,model):
 
 def main():
     
-    mlflow.set_experiment("codrift")
+    exp = "codrift_debug"
+    mlflow.set_experiment(exp)
         
     if sys.argv[1] == 'help':
         print('models: rw, arima, sarima, AS, ASDS, ASO...')
@@ -357,12 +402,13 @@ def main():
     split = sys.argv[3]
     lags = int(sys.argv[4])
     size = int(sys.argv[5])
-    if (model == 'ASDS' or model == 'AEDS'):
+    if (model == 'ASDS' or model == 'AEDS' or model == 'ASVDS'):
         K = int(sys.argv[6])
         rname = country+'.'+model+'.'+split+'.'+str(lags)+'.'+str(size)+'.'+str(K)
     else:
         rname =  country+'.'+model+'.'+split
 
+    print(exp)
     print(rname)
     with mlflow.start_run(run_name=rname):
 
@@ -390,6 +436,13 @@ def main():
             global y_val
             global X_test_mm
             global y_test
+
+            X_train_mm = 0
+            y_train = 0
+            X_val_mm = 0
+            y_val = 0
+            X_test_mm = 0
+            y_test = 0
             
             X, y = splitter(data, lags)
             sz = len(X)
@@ -492,9 +545,18 @@ def main():
                     mlflow.end_run()
             
             if model == 'svm':                    
-                    norm, X_train_mm = normalizer(X_train)
-                    X_val_mm = normalizer(X_val, norm)
-                    X_test_mm = normalizer(X_test, norm)
+                    #norm, X_train_mm = normalizer(X_train)
+                    #X_val_mm = normalizer(X_val, norm)
+
+                    X_train_mm = normalizer(X_train, normx)
+                    y_train = normalizer(y_train.values.reshape(-1,1), normy).ravel()
+                    X_val_mm = normalizer(X_val, normx)
+                    y_val = normalizer(y_val.values.reshape(-1,1), normy).ravel()
+                    X_test_mm = normalizer(X_test, normx)
+
+                    #print(X_train_mm)
+                    #print(y_train)
+                    
                     #print(np.concatenate((X_train_mm, X_val_mm), axis=0), np.concatenate((y_train, y_val), axis=0))
                 #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
                     if not os.path.exists("models/"+country+"/svm.pkl"):
@@ -504,7 +566,9 @@ def main():
                         svm = joblib.load("models/"+country+"/svm.pkl")                  
                     
                     if split == 'test':
-                        y_pred = post_forecast(pd.DataFrame(svm.predict(X_test_mm)))
+                        y_pred = normalizer(svm.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
+                        y_pred = post_forecast(pd.DataFrame(y_pred))
+                        #y_pred = post_forecast(pd.DataFrame(svm.predict(X_test_mm)))
                         y_test = pd.DataFrame(y_test.reset_index(drop=True))
                         metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
                         draw_predictions(country, y_pred, y_test)
@@ -519,10 +583,17 @@ def main():
             if model == 'elm':
                     #X_train_mm, y_train, X_val_mm, y_val, X_test_mm, y_test = torch_data(train_data, val_data, test_data, lags)
                     
-                    norm, X_train_mm = normalizer(X_train)
-                    X_val_mm = normalizer(X_val, norm)
-                    X_test_mm = normalizer(X_test, norm)
-                    X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train.values.reshape(-1,1)), torcher(X_val_mm), torcher(y_val.values.reshape(-1,1))
+                    #norm, X_train_mm = normalizer(X_train)
+                    #X_val_mm = normalizer(X_val, norm)
+
+                    X_train_mm = normalizer(X_train, normx)
+                    y_train_mm = normalizer(y_train.values.reshape(-1,1), normy)
+                    X_val_mm = normalizer(X_val, normx)
+                    y_val_mm = normalizer(y_val.values.reshape(-1,1), normy)
+
+                    X_test_mm = normalizer(X_test, normx)
+                    X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train_mm.reshape(-1,1)), torcher(X_val_mm), torcher(y_val_mm.reshape(-1,1))
+                    #X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train.values.reshape(-1,1)), torcher(X_val_mm), torcher(y_val.values.reshape(-1,1))
                     X_test_mm, y_test= torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
         
                 #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
@@ -533,12 +604,54 @@ def main():
                         elm = torch.load("models/"+country+"/elm.pkl")
                     
                     if split == 'test':
-                        y_pred = post_forecast(pd.Series(elm.predict(X_test_mm).numpy().flatten()))
-                        y_test = pd.DataFrame(y_test.numpy())
+                        y_pred = normalizer(elm.predict(X_test_mm).numpy().reshape(-1,1), normy, -1).flatten()
+                        y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
+                        #y_pred = post_forecast(pd.Series(elm.predict(X_test_mm).numpy().flatten()))
+                        y_test = pd.DataFrame(y_test.numpy()).reset_index(drop=True)
                         metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
                         draw_predictions(country, y_pred, y_test)
                     log_metrics(metrics)
                     log_params({'h_size': elm._h_size})
+                    #log_params({'h_size': elm._h_size, 'activation' :elm.activation_name})
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
+
+                    pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_arts(country,model)
+                    mlflow.end_run()
+
+            if model == 'lstm':
+                    #X_train_mm, y_train, X_val_mm, y_val, X_test_mm, y_test = torch_data(train_data, val_data, test_data, lags)
+                    
+                    #norm, X_train_mm = normalizer(X_train)
+                    #X_val_mm = normalizer(X_val, norm)
+
+                    X_train_mm = normalizer(X_train, normx)
+                    y_train = normalizer(y_train.values.reshape(-1,1), normy)
+                    X_val_mm = normalizer(X_val, normx)
+                    y_val = normalizer(y_val.values.reshape(-1,1), normy)
+
+                    X_test_mm = normalizer(X_test, normx)
+                    #X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train_mm.reshape(-1,1)), torcher(X_val_mm), torcher(y_val_mm.reshape(-1,1))
+                    #X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train.values.reshape(-1,1)), torcher(X_val_mm), torcher(y_val.values.reshape(-1,1))
+                    #X_test_mm, y_test= torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
+        
+                #with mlflow.start_run(run_name=country+'.'+model+'.'+split):
+                    if not os.path.exists("models/"+country+"/lstm"):
+                        lstm = train_lstm(X_train_mm, y_train)
+                        lstm.save("models/"+country+"/lstm")
+                    else:
+                        lstm = keras.models.load_model("models/"+country+"/lstm")
+                       
+                    
+                    if split == 'test':
+                        y_pred = normalizer(lstm.predict(X_test_mm).numpy().reshape(-1,1), normy, -1).flatten()
+                        y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
+                        #y_pred = post_forecast(pd.Series(elm.predict(X_test_mm).numpy().flatten()))
+                        y_test = pd.DataFrame(y_test.numpy()).reset_index(drop=True)
+                        metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
+                        draw_predictions(country, y_pred, y_test)
+                    log_metrics(metrics)
+                    #log_params()
                     #log_params({'h_size': elm._h_size, 'activation' :elm.activation_name})
                     mlflow.set_tags({'data': country, 'split': split, 'model': model, 'size': size})
 
@@ -718,11 +831,11 @@ def main():
                                 X_val, y_val  = splitter(dft, lags) #gambiarra, é preciso definir o conjunto de validaçao dentro da janela de drift
                                 
                                 X_train_mm = normalizer(X_train, normx)
-                                y_train_mm = normalizer(y_train.values.reshape(-1,1), normy)
+                                y_train = normalizer(y_train.values.reshape(-1,1), normy)
                                 X_val_mm = normalizer(X_val, normx)
-                                y_val_mm = normalizer(y_val.values.reshape(-1,1), normy)
+                                y_val = normalizer(y_val.values.reshape(-1,1), normy)
                                 
-                                svm = train_svm(X_train_mm, y_train_mm)
+                                svm = train_svm(X_train_mm, y_train)
                                 joblib.dump(svm, "models/"+country+"/svms/svms"+str(k)+".pkl")
                                 svms[k] = joblib.load("models/"+country+"/svms/svms"+str(k)+".pkl")
                             except:
@@ -746,6 +859,90 @@ def main():
                     pd.DataFrame(preds).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
                     log_artifacts("outputs/"+country+"/data")
                     log_artifacts("outputs/"+country+"/preds/"+model)
+                    mlflow.end_run()
+
+            #ADWIN-SVM-DYNAMIC-SELECTION (ASVDS)
+            if model == "ASVDS":
+                submodel = "ASV"
+                size = int(sys.argv[5])
+                K = int(sys.argv[6])
+                lags = int(sys.argv[4])
+                if not os.path.exists("outputs/"+country+"/preds/"+submodel):
+                    print('execute o modelo AE antes, e tente novamente')
+                else:
+                    detector = 'adwin'
+                    drifts, drift_data = get_drifts(train_data, country, detector=detector)
+                    draw_drifts(country, drifts, drift_data, train_data)
+                    log_artifact('outputs/'+country+'/drifts.png')
+                    svms = {}
+                    for k, dft in drift_data.items():
+                        try: 
+                            #print('carrega',k)
+                            svms[k] = joblib.load("models/"+country+"/svms/svms"+str(k)+".pkl")
+                        except:
+                            print('erro carrega', k)
+                    
+                    #X_test_mm = normalizer(X_test, norms[k])
+                    #X_test_mm, y_test = torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
+                    #X_test_mm = torcher(X_test_mm)
+                    #print('xtest', X_test)
+                    #print('ytest', y_test)
+                    X_test_mm = normalizer(X_test, normx)
+                    preds = {}
+                    errors = {}
+                    selection = {}
+                    for w in range(size,len(y_test)):
+                        last = w
+                        first = w - size
+                        preds[last] = {}
+                        errors[last] = {}
+                        selection[last] = {}
+                        for k, m in svms.items():
+                            y_pred = normalizer(m.predict(X_test_mm[first:last]).reshape(-1,1), normy, -1).flatten()
+                            #y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
+                            
+                            preds[last][k] = pd.Series(y_pred).reset_index(drop=True)
+                            #preds[last][k] = m.predict(X_test_mm[first:last])
+                            errors[last][k] = mean_squared_error(y_test.iloc[first:last], preds[last][k])
+                        #print(preds)
+                        #print(y_test.iloc[first:last])
+                        #print(errors[last])
+                        df_error = pd.Series(errors[last]).rank()
+                        #print(df_error)
+                        for i in range(K):
+                            try:
+                                selection[last][i] = df_error.loc[df_error == i+1].index.values[0]
+                            except:
+                                #print(['*']*1000)
+                                #print(df_error.idxmin()) # solucao para ranks malucos 1.5, 2 sem 1...
+                                selection[last][i] = df_error.idxmin()
+                        # #print(selection[last])
+                        #selection[last] = df_error.loc[df_error < K+1].index.values[:K]
+                    df_selection = pd.DataFrame(selection).T
+                    #df_selection.index = pd.to_datetime(df_selection.index)
+                    preds_all = pd.read_csv("outputs/"+country+"/preds/"+submodel+"/"+submodel+'_'+split+'.csv', index_col=0, parse_dates=True)
+                    preds_selection = {}
+                    #print(preds_all)
+                    for row in df_selection.iterrows():
+                        preds_selection[row[0]] = preds_all.loc[row[0]].iloc[row[1]].mean()
+                        #print(row[0])
+                        #print(row[1])
+                        #print(preds_all.loc[row[0]].iloc[row[1]])
+                    preds_selection = pd.Series(preds_selection).T
+                    #print(preds_selection)
+                    #print(data)
+                    #print(data.align(preds_selection, join='right', axis=0))
+                    #metrics = eval_metrics(preds_selection, data.reindex_like(preds_selection))
+                    metrics = eval_metrics(pd.DataFrame(y_test).reset_index(drop=True).iloc[size:], preds_selection)
+                    draw_predictions(country, preds_selection, data)
+                    log_metrics(metrics)
+                    pd.DataFrame(errors).to_csv("outputs/"+country+"/preds/"+model+"/errors.csv")
+                    pd.DataFrame(preds).to_csv("outputs/"+country+"/preds/"+model+"/preds.csv")
+                    df_selection.to_csv("outputs/"+country+"/preds/"+model+"/selection.csv")
+                    preds_selection.to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
+                    log_params({'pool': 'elms', 'window_size': size ,'K':K, 'metric':'mse', 'distance': None})
+                    mlflow.set_tags({'data': country, 'split': split, 'model': model, 'drift': detector, 'size': size, 'k': k})
+                    log_arts(country,model)
                     mlflow.end_run()
 
             #ADWIN-SVM-ORACLE (ASVO)
@@ -781,38 +978,27 @@ def main():
                     if not os.path.exists("models/"+country+"/norms"):
                         os.makedirs("models/"+country+"/norms")
                     elms = {}
-                    norms = {}
                     for k, dft in drift_data.items():
                         try: 
-                            #print('carrega',k)
                             elms[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
-                            #with open("models/"+country+"/elms/norm"+str(k)+".pkl", 'rb') as f:
-                                # The protocol version used is detected automatically, so we do not
-                                # have to specify it.
-                            #    norms[k] = pickle.load(f)
-                            norms[k] = joblib.load("models/"+country+"/norms/norm"+str(k)+".pkl") 
                         except:
                             try:
-                                #print('treino',k)
                                 X_train, y_train  = splitter(dft, lags)
                                 X_val, y_val  = splitter(dft, lags) #gambiarra, é preciso definir o conjunto de validaçao dentro da janela de drift
-                                #print('dados')
                                 
-                                norm, X_train_mm = normalizer(X_train)
-                                X_val_mm = normalizer(X_val, norm)
-                                norms[k] = norm
-                                joblib.dump(norm, "models/"+country+"/norms/norm"+str(k)+".pkl") 
+                                X_train_mm = normalizer(X_train, normx)
+                                y_train_mm = normalizer(y_train.values.reshape(-1,1), normy)
+                                X_val_mm = normalizer(X_val, normx)
+                                y_val_mm = normalizer(y_val.values.reshape(-1,1), normy)
+
                                 #print('norm')
-                                X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train.values.reshape(-1,1)), torcher(X_val_mm), torcher(y_val.values.reshape(-1,1))
+                                X_train_mm, y_train, X_val_mm, y_val = torcher(X_train_mm), torcher(y_train_mm.reshape(-1,1)), torcher(X_val_mm), torcher(y_val_mm.reshape(-1,1))
                                 #print('torch')
                                 elm = train_elm(X_train_mm, y_train)
                                 #print('treinamento')
                                 
                                 torch.save(elm ,"models/"+country+"/elms/elm"+str(k)+".pkl")
                                 elms[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
-                                #with open("models/"+country+"/elms/norm"+str(k)+".pickle", 'wb') as f:
-                                    # Pickle the 'data' dictionary using the highest protocol available.
-                                #    pickle.dump(norms, f, pickle.HIGHEST_PROTOCOL)
 
                             except:
                                 pass
@@ -822,13 +1008,16 @@ def main():
                     preds = {}
                     for k, m in elms.items():
                         with mlflow.start_run(run_name=country+'.'+model+'.'+split+'.'+str(k), nested=True):
-                            X_test_mm = normalizer(X_test, norms[k])
-                            X_test_mm, y_test = torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
-
+                            X_test_mm = normalizer(X_test, normx)
+                            X_test_mm = torcher(X_test_mm)
                             log_params({'h_size': m._h_size, 'activation' :m.activation_name})
                             mlflow.set_tags({'data': country, 'split': split, 'model': model, 'submodel': k, 'drift': detector})
-                            y_pred = post_forecast(pd.Series(m.predict(X_test_mm).numpy().flatten()))
-                            y_test = pd.DataFrame(y_test.numpy())
+                            y_pred = normalizer(m.predict(X_test_mm).numpy().reshape(-1,1), normy, -1).flatten()
+                            y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
+                            #y_pred = post_forecast(pd.Series(m.predict(X_test_mm).numpy().flatten())).reset_index(drop=True)
+                            
+                            y_test = pd.DataFrame(y_test).reset_index(drop=True)
+                            #y_test = pd.DataFrame(y_test.numpy())
                             metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
                             log_metrics(metrics)
                             preds[k] = y_pred
@@ -853,20 +1042,20 @@ def main():
                     draw_drifts(country, drifts, drift_data, train_data)
                     log_artifact('outputs/'+country+'/drifts.png')
                     elms = {}
-                    norms = {}
                     for k, dft in drift_data.items():
                         try: 
                             #print('carrega',k)
                             elms[k] = torch.load("models/"+country+"/elms/elm"+str(k)+".pkl")
-                            norms[k] = joblib.load("models/"+country+"/norms/norm"+str(k)+".pkl") 
                         except:
                             print('erro carrega', k)
                     
-                    X_test_mm = normalizer(X_test, norms[k])
+                    #X_test_mm = normalizer(X_test, norms[k])
                     #X_test_mm, y_test = torcher(X_test_mm), torcher(y_test.values.reshape(-1,1))
-                    X_test_mm = torcher(X_test_mm)
+                    #X_test_mm = torcher(X_test_mm)
                     #print('xtest', X_test)
                     #print('ytest', y_test)
+                    X_test_mm = normalizer(X_test, normx)
+                    X_test_mm = torcher(X_test_mm)
                     preds = {}
                     errors = {}
                     selection = {}
@@ -877,7 +1066,11 @@ def main():
                         errors[last] = {}
                         selection[last] = {}
                         for k, m in elms.items():
-                            preds[last][k] = m.predict(X_test_mm[first:last])
+                            y_pred = normalizer(m.predict(X_test_mm[first:last]).numpy().reshape(-1,1), normy, -1).flatten()
+                            #y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
+                            
+                            preds[last][k] = pd.Series(y_pred).reset_index(drop=True)
+                            #preds[last][k] = m.predict(X_test_mm[first:last])
                             errors[last][k] = mean_squared_error(y_test.iloc[first:last], preds[last][k])
                         #print(preds)
                         #print(y_test.iloc[first:last])
