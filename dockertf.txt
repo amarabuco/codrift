@@ -1,0 +1,7 @@
+docker run --mount type=bind,source="$(pwd)",target=/codrift --gpus all -it tensorflow/tensorflow:latest-gpu
+
+cd codrift
+
+source ./venv/bin/activate
+
+pip install -r ./requirements.txt

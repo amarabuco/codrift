@@ -21,6 +21,8 @@ import warnings
 import os
 import sys
 warnings.simplefilter('ignore')
+#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+#os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 import mlflow
 import mlflow.statsmodels
@@ -291,10 +293,14 @@ def train_elm(x, y):
 def objective_svm(trial):
     svr_k = trial.suggest_categorical('kernel',['linear', 'rbf'])
     #svr_k = trial.suggest_categorical('kernel',['rbf'])
-    svr_g = trial.suggest_float("gamma", 0.001, 1000, log=True) #auto, scale
-    svr_c = trial.suggest_float("C", 0.0001, 10000, log=True)
-    svr_e = trial.suggest_float("epsilon",0.001, 0.1, log=True)
-    svr_t = trial.suggest_float("tolerance", 0.0001, 0.01, log=True)
+    svr_g = trial.suggest_categorical("gamma", [1, 0.1, 0.01, 0.001]) #auto, scale
+    #svr_g = trial.suggest_float("gamma", 0.001, 1, log=True) #auto, scale
+    svr_c = trial.suggest_categorical("C", [0.1, 1, 100, 1000, 10000])
+    #svr_c = trial.suggest_float("C", 0.1, 10000, log=True)
+    svr_e = trial.suggest_categorical("epsilon", [0.1, 0.01, 0.001])
+    #svr_e = trial.suggest_float("epsilon",0.001, 0.1, log=True)
+    svr_t = trial.suggest_categorical("tolerance", [0.01, 0.001, 0.0001])
+    #svr_t = trial.suggest_float("tolerance", 0.0001, 0.01, log=True)
     regressor_obj = sklearn.svm.SVR(kernel=svr_k, gamma=svr_g, C=svr_c, epsilon=svr_e, tol=svr_t)
 
     score = sklearn.model_selection.cross_val_score(regressor_obj, np.concatenate((X_train_mm, X_val_mm)), np.concatenate((y_train, y_val)),
@@ -311,6 +317,7 @@ def train_svm(x, y):
     best_svr.fit(x, y)
     return best_svr
 
+
 def objective_lstm(trial):
     model = Sequential()
     model.add(layers.LSTM(units= trial.suggest_categorical('units', [8, 16, 32, 64, 100, 200]), input_shape=(14, 1)))
@@ -320,8 +327,8 @@ def objective_lstm(trial):
     #model.add(layers.Dropout(0.2))
     model.add(layers.Dense(1, activation=trial.suggest_categorical('activation', ['relu', 'linear', 'tanh']),) )
 
-    score = np.zeros(10)
-    for i in range(10):
+    score = np.zeros(3)
+    for i in range(3):
         # We compile our model with a sampled learning rate.
         model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001), loss='mse')
 
@@ -340,15 +347,22 @@ def objective_lstm(trial):
         score[i] = model.evaluate(X_val_mm, y_val, verbose=0)
     return score.mean()   
 
+def lstm(input_size, units, activation):
+    model = Sequential()
+    model.add(layers.LSTM(units= units, input_shape=(input_size, 1)))
+    model.add(layers.Dense(1, activation=activation ))
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.001), loss='mse')
+    return model
 
 def train_lstm(x, y):
     #optimization
     study = optuna.create_study(direction="maximize", study_name='lstm_study')
-    study.optimize(objective_lstm, n_trials=50, show_progress_bar=True)
+    study.optimize(objective_lstm, n_trials=10, show_progress_bar=True)
     params = study.best_params
-    best_lstm = lstm(input_size=14, h_size=params['h_size'], activation=params['activation'], device=device) #variar o input-size (FIX)
+    best_lstm = lstm(input_size=14, units=params['units'], activation=params['activation']) #variar o input-size (FIX)
     best_lstm.fit(x, y)
     return best_lstm
+
 
 def eval_metrics(actual, pred):
     rmse = mean_squared_error(actual, pred, squared=False)
@@ -391,7 +405,7 @@ def log_arts(country,model):
 
 def main():
     
-    exp = "codrift_debug"
+    exp = "codrift_220525"
     mlflow.set_experiment(exp)
         
     if sys.argv[1] == 'help':
@@ -416,6 +430,8 @@ def main():
                 os.makedirs("outputs/"+country+"/data")
             if not os.path.exists("outputs/"+country+"/preds/"+model):
                 os.makedirs("outputs/"+country+"/preds/"+model)
+            if not os.path.exists("models/"+country):
+                os.makedirs("models/"+country)
 
             data = get_data('covid', country+'_daily.csv')
             data = fix_outliers(data)
@@ -549,9 +565,9 @@ def main():
                     #X_val_mm = normalizer(X_val, norm)
 
                     X_train_mm = normalizer(X_train, normx)
-                    y_train = normalizer(y_train.values.reshape(-1,1), normy).ravel()
+                    #y_train = normalizer(y_train.values.reshape(-1,1), normy).ravel()
                     X_val_mm = normalizer(X_val, normx)
-                    y_val = normalizer(y_val.values.reshape(-1,1), normy).ravel()
+                    #y_val = normalizer(y_val.values.reshape(-1,1), normy).ravel()
                     X_test_mm = normalizer(X_test, normx)
 
                     #print(X_train_mm)
@@ -566,7 +582,8 @@ def main():
                         svm = joblib.load("models/"+country+"/svm.pkl")                  
                     
                     if split == 'test':
-                        y_pred = normalizer(svm.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
+                        #y_pred = normalizer(svm.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
+                        y_pred = svm.predict(X_test_mm).reshape(-1,1).flatten()
                         y_pred = post_forecast(pd.DataFrame(y_pred))
                         #y_pred = post_forecast(pd.DataFrame(svm.predict(X_test_mm)))
                         y_test = pd.DataFrame(y_test.reset_index(drop=True))
@@ -618,7 +635,7 @@ def main():
                     pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
                     log_arts(country,model)
                     mlflow.end_run()
-
+            
             if model == 'lstm':
                     #X_train_mm, y_train, X_val_mm, y_val, X_test_mm, y_test = torch_data(train_data, val_data, test_data, lags)
                     
@@ -644,10 +661,10 @@ def main():
                        
                     
                     if split == 'test':
-                        y_pred = normalizer(lstm.predict(X_test_mm).numpy().reshape(-1,1), normy, -1).flatten()
+                        y_pred = normalizer(lstm.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
                         y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
                         #y_pred = post_forecast(pd.Series(elm.predict(X_test_mm).numpy().flatten()))
-                        y_test = pd.DataFrame(y_test.numpy()).reset_index(drop=True)
+                        y_test = pd.DataFrame(y_test).reset_index(drop=True)
                         metrics = eval_metrics(y_test.iloc[7:], y_pred.iloc[7:])
                         draw_predictions(country, y_pred, y_test)
                     log_metrics(metrics)
@@ -658,6 +675,7 @@ def main():
                     pd.DataFrame(y_pred).to_csv("outputs/"+country+"/preds/"+model+"/"+model+'_'+split+'.csv')
                     log_arts(country,model)
                     mlflow.end_run()
+            
 
             #ADWIN-SARIMA (AS)
             if model == "AS":
@@ -831,9 +849,9 @@ def main():
                                 X_val, y_val  = splitter(dft, lags) #gambiarra, é preciso definir o conjunto de validaçao dentro da janela de drift
                                 
                                 X_train_mm = normalizer(X_train, normx)
-                                y_train = normalizer(y_train.values.reshape(-1,1), normy)
+                                #y_train = normalizer(y_train.values.reshape(-1,1), normy)
                                 X_val_mm = normalizer(X_val, normx)
-                                y_val = normalizer(y_val.values.reshape(-1,1), normy)
+                                #y_val = normalizer(y_val.values.reshape(-1,1), normy)
                                 
                                 svm = train_svm(X_train_mm, y_train)
                                 joblib.dump(svm, "models/"+country+"/svms/svms"+str(k)+".pkl")
@@ -844,7 +862,8 @@ def main():
                     preds = {}
                     for k, m in svms.items():
                         with mlflow.start_run(run_name=country+'.'+model+'.'+split+'.'+str(k), nested=True):
-                            y_pred = normalizer(m.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
+                            #y_pred = normalizer(m.predict(X_test_mm).reshape(-1,1), normy, -1).flatten()
+                            y_pred = m.predict(X_test_mm).reshape(-1,1).flatten()
                             #print(y_pred)
                             y_pred = post_forecast(pd.Series(y_pred)).reset_index(drop=True)
                             preds[k] = y_pred
@@ -868,7 +887,7 @@ def main():
                 K = int(sys.argv[6])
                 lags = int(sys.argv[4])
                 if not os.path.exists("outputs/"+country+"/preds/"+submodel):
-                    print('execute o modelo AE antes, e tente novamente')
+                    print('execute o modelo ASV antes, e tente novamente')
                 else:
                     detector = 'adwin'
                     drifts, drift_data = get_drifts(train_data, country, detector=detector)
