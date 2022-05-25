@@ -4,4 +4,12 @@ cd codrift
 
 source ./venv/bin/activate
 
-pip install -r ./requirements.txt
+pip install -r ./reqs.txt
+
+
+#docker run -u $(id -u):$(id -g) --mount type=bind,source="$(pwd)",target=/codrift --gpus all -it tensorflow/tensorflow:latest-gpu
+
+#Executar usuario, mas não funciona
+docker start 35887b658aaf
+
+docker exec -it --user $(id -u):$(id -g) 35887b658aaf /bin/bash

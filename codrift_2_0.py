@@ -710,6 +710,9 @@ for k, m in enumerate(list_models):
 """### One"""
 
 
+def get_selection(new_data, models, size, k):
+  
+
 
 drift_data.pop(10)
 
